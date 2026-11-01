@@ -1,5 +1,6 @@
 import numpy as np
 
+# Standard AES S-Box substitution lookup table
 AES_SBOX = np.array([
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -18,11 +19,15 @@ AES_SBOX = np.array([
     0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
     0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
 ], dtype=np.uint8)
-
 def hamming_weight(val):
+    """Calculates the number of active bits (current consumption model)."""
     return bin(int(val)).count('1')
 
 def simulate_traces(num_traces=500, secret_key=0x2B, masked=False):
+    """
+    Simulates power consumption traces of an MCU performing an S-Box lookup.
+    Leakage model: Power = k * HW(Sbox(P ^ K)) + Gaussian Noise.
+    """
     np.random.seed(42)
     plaintexts = np.random.randint(0, 256, size=num_traces, dtype=np.uint8)
     traces = np.zeros(num_traces, dtype=np.float32)
@@ -30,12 +35,15 @@ def simulate_traces(num_traces=500, secret_key=0x2B, masked=False):
     for i in range(num_traces):
         p = plaintexts[i]
         if not masked:
+            # UNPROTECTED: Intermediate state directly correlates with power consumption
             intermediate = AES_SBOX[p ^ secret_key]
             noise = np.random.normal(0, 1.2)
             traces[i] = hamming_weight(intermediate) + noise
         else:
+            # 1ST-ORDER BOOLEAN MASKING: Split state using random mask M
             mask = np.random.randint(0, 256, dtype=np.uint8)
             masked_p = p ^ mask
+            # Hardware evaluates masked intermediate, randomizing power draw
             intermediate = AES_SBOX[masked_p ^ secret_key] ^ mask
             noise = np.random.normal(0, 1.2)
             traces[i] = hamming_weight(intermediate) + noise
@@ -43,11 +51,21 @@ def simulate_traces(num_traces=500, secret_key=0x2B, masked=False):
     return plaintexts, traces
 
 def perform_cpa_attack(plaintexts, traces):
+    """
+    Performs Correlation Power Analysis (CPA) using Pearson correlation
+    across all 256 possible key candidates [0x00 to 0xFF].
+    """
+    num_traces = len(traces)
     correlations = np.zeros(256)
+
     for candidate_key in range(256):
+        # 1. Compute hypothetical intermediate value for this key guess
         hypothetical_intermediates = AES_SBOX[plaintexts ^ candidate_key]
+        
+        # 2. Compute hypothetical power consumption (Hamming Weight model)
         hypothetical_power = np.array([hamming_weight(v) for v in hypothetical_intermediates])
 
+        # 3. Calculate Pearson Correlation Coefficient between actual and hypothetical power
         h_mean = np.mean(hypothetical_power)
         t_mean = np.mean(traces)
         
@@ -67,6 +85,7 @@ if __name__ == "__main__":
     print(f"  Ground Truth Hardware Secret Key: 0x{SECRET_KEY:02X}           ")
     print("=================================================================\n")
 
+    # 1. Attack Unprotected Hardware Implementation
     plaintexts, traces = simulate_traces(num_traces=600, secret_key=SECRET_KEY, masked=False)
     recovered_key, corr, _ = perform_cpa_attack(plaintexts, traces)
 
@@ -76,6 +95,7 @@ if __name__ == "__main__":
     if recovered_key == SECRET_KEY:
         print("  -> VULNERABILITY CONFIRMED: Secret key successfully extracted via power leakage.\n")
 
+    # 2. Attack 1st-Order Boolean Masked Implementation
     plaintexts_m, traces_m = simulate_traces(num_traces=600, secret_key=SECRET_KEY, masked=True)
     recovered_key_m, corr_m, _ = perform_cpa_attack(plaintexts_m, traces_m)
 
